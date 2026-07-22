@@ -165,6 +165,33 @@ pub mod ffi {
         pub fn menu_entries(out: *mut u8, cap: i32) -> i32;
         pub fn launch_entry(id: *const u8, id_len: i32) -> i32;
 
+        // clipboard
+        pub fn clipboard_get(out: *mut u8, cap: i32) -> i32;
+        pub fn clipboard_set(ptr: *const u8, len: i32);
+
+        // processes (needs permissions.process_manager)
+        pub fn list_apps(out: *mut u8, cap: i32) -> i32;
+        pub fn kill_app(target: i32) -> i32;
+        pub fn kill_package(id: *const u8, id_len: i32) -> i32;
+
+        // services (needs permissions.service_manager)
+        pub fn service_list(out: *mut u8, cap: i32) -> i32;
+        pub fn service_start(id: *const u8, id_len: i32) -> i32;
+        pub fn service_stop(id: *const u8, id_len: i32) -> i32;
+        pub fn service_enable(id: *const u8, id_len: i32, enabled: i32) -> i32;
+
+        // network (needs permissions.network)
+        pub fn http_request(
+            method: *const u8,
+            method_len: i32,
+            url: *const u8,
+            url_len: i32,
+            body: *const u8,
+            body_len: i32,
+            out: *mut u8,
+            cap: i32,
+        ) -> i32;
+
         // window management (needs permissions.window_manager)
         pub fn win_list(out: *mut u8, cap: i32) -> i32;
         pub fn win_title(window: i32, out: *mut u8, cap: i32) -> i32;
@@ -798,6 +825,155 @@ pub fn menu_entries() -> Vec<MenuEntry> {
 /// Launch what a menu entry points at, its arguments included.
 pub fn launch_entry(id: &str) -> bool {
     unsafe { ffi::launch_entry(id.as_ptr(), id.len() as i32) == 0 }
+}
+
+// ---------------------------------------------------------------- clipboard --
+//
+// One plain-text buffer shared by every package, and no permission gates it: a clipboard
+// that does not cross app boundaries is not a clipboard. Nothing secret belongs in it.
+
+pub fn clipboard_get() -> String {
+    read_string(|out, cap| unsafe { ffi::clipboard_get(out, cap) }).unwrap_or_default()
+}
+
+pub fn clipboard_set(text: &str) {
+    unsafe { ffi::clipboard_set(text.as_ptr(), text.len() as i32) }
+}
+
+// ---------------------------------------------------------------- processes --
+//
+// Every call here needs `permissions.process_manager = true` in package.toml.
+
+/// A running app and what it is costing.
+pub struct AppStatus {
+    pub id: i32,
+    pub package: String,
+    pub name: String,
+    pub title: String,
+    pub language: String,
+    pub uptime_frames: u64,
+    pub ticks: u64,
+    /// Rolling average and worst case of one tick, in milliseconds. Everything runs on one
+    /// thread, so this *is* the app's share of the frame.
+    pub tick_ms: f64,
+    pub tick_ms_peak: f64,
+    /// A floor on resident size, not a total: interpreter heaps cannot be measured from
+    /// the host, so this counts only what the kernel holds on the app's behalf.
+    pub bytes: u64,
+    pub window: i32,
+    pub is_service: bool,
+}
+
+pub fn list_apps() -> Vec<AppStatus> {
+    let raw = read_string(|out, cap| unsafe { ffi::list_apps(out, cap) }).unwrap_or_default();
+    raw.lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            Some(AppStatus {
+                id: parts.next()?.parse().ok()?,
+                package: String::from(parts.next()?),
+                name: String::from(parts.next()?),
+                title: String::from(parts.next()?),
+                language: String::from(parts.next()?),
+                uptime_frames: parts.next()?.parse().ok()?,
+                ticks: parts.next()?.parse().ok()?,
+                tick_ms: parts.next()?.parse().ok()?,
+                tick_ms_peak: parts.next()?.parse().ok()?,
+                bytes: parts.next()?.parse().ok()?,
+                window: parts.next()?.parse().ok()?,
+                is_service: parts.next()? == "1",
+            })
+        })
+        .collect()
+}
+
+/// Stop one running app by id. Queued like every other close, so the target is never torn
+/// down while its own code is on the stack.
+pub fn kill_app(target: i32) -> bool {
+    unsafe { ffi::kill_app(target) == 0 }
+}
+
+/// Stop every app of one package. Returns how many were stopped, or `None` on refusal.
+pub fn kill_package(id: &str) -> Option<u32> {
+    let count = unsafe { ffi::kill_package(id.as_ptr(), id.len() as i32) };
+    (count >= 0).then_some(count as u32)
+}
+
+// ----------------------------------------------------------------- services --
+//
+// Every call here needs `permissions.service_manager = true` in package.toml.
+
+/// A service and what it is doing.
+pub struct ServiceInfo {
+    pub package: String,
+    pub description: String,
+    pub state: String,
+    pub enabled: bool,
+    pub restart: String,
+    pub restarts: u32,
+    pub last_error: String,
+}
+
+pub fn service_list() -> Vec<ServiceInfo> {
+    let raw = read_string(|out, cap| unsafe { ffi::service_list(out, cap) }).unwrap_or_default();
+    raw.lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            Some(ServiceInfo {
+                package: String::from(parts.next()?),
+                description: String::from(parts.next()?),
+                state: String::from(parts.next()?),
+                enabled: parts.next()? == "1",
+                restart: String::from(parts.next()?),
+                restarts: parts.next()?.parse().ok()?,
+                // Empty when the service has never failed, and an error message may itself
+                // be empty, so this is the one field allowed to be missing entirely.
+                last_error: String::from(parts.next().unwrap_or_default()),
+            })
+        })
+        .collect()
+}
+
+pub fn service_start(id: &str) -> bool {
+    unsafe { ffi::service_start(id.as_ptr(), id.len() as i32) == 0 }
+}
+
+pub fn service_stop(id: &str) -> bool {
+    unsafe { ffi::service_stop(id.as_ptr(), id.len() as i32) == 0 }
+}
+
+/// Turn a service on or off for future boots. Persisted immediately.
+pub fn service_enable(id: &str, enabled: bool) -> bool {
+    unsafe { ffi::service_enable(id.as_ptr(), id.len() as i32, enabled as i32) == 0 }
+}
+
+// ------------------------------------------------------------------ network --
+//
+// Needs `permissions.network = true` in package.toml.
+
+/// Make an HTTP request; `None` when the permission is missing or the request failed.
+///
+/// Synchronous: the frame loop stops while the request is in flight.
+pub fn http_request(method: &str, url: &str, body: &str) -> Option<(u16, String)> {
+    let raw = read_string(|out, cap| unsafe {
+        ffi::http_request(
+            method.as_ptr(),
+            method.len() as i32,
+            url.as_ptr(),
+            url.len() as i32,
+            body.as_ptr(),
+            body.len() as i32,
+            out,
+            cap,
+        )
+    })?;
+    // Both halves travel in one buffer, as "<status>\t<body>", the same way `win_hit_test`
+    // returns its pair: a wasm function returns one scalar, and re-issuing the request to
+    // collect the other half would be a second request.
+    let (status, body) = raw.split_once('\t')?;
+    Some((status.parse().ok()?, String::from(body)))
 }
 
 // ------------------------------------------------------- window management --
