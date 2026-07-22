@@ -82,7 +82,10 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
     quote! {
         #inner
 
-        #[no_mangle]
+        // `unsafe(no_mangle)`, not bare `no_mangle`: proc-macro tokens carry *this*
+        // crate's edition, which is 2024, where the attribute must be wrapped. The bare
+        // form is rejected no matter which edition the package itself picks.
+        #[unsafe(no_mangle)]
         pub extern "C" fn #name(#(#params),*) {
             #inner_name(#(#args),*);
         }
