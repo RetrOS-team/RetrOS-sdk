@@ -1,0 +1,12 @@
+[package]
+name = "retros-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Write RetrOS apps in Rust, compiled to wasm32-unknown-unknown."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+retros-sdk-macros = { path = "../rust-macros" }
