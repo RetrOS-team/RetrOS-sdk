@@ -79,6 +79,25 @@ pub mod ffi {
         pub fn window_height() -> i32;
         pub fn window_id() -> i32;
 
+        // clipping and layering
+        pub fn clip_push(x: i32, y: i32, w: i32, h: i32) -> i32;
+        pub fn clip_pop() -> i32;
+        pub fn clip_reset() -> i32;
+        pub fn clip_x() -> i32;
+        pub fn clip_y() -> i32;
+        pub fn clip_w() -> i32;
+        pub fn clip_h() -> i32;
+        pub fn layer(n: i32) -> i32;
+        pub fn current_layer() -> i32;
+
+        // power (needs permissions.power)
+        pub fn shutdown() -> i32;
+        pub fn reboot() -> i32;
+
+        // host handoff (needs permissions.host_open)
+        pub fn host_open(ptr: *const u8, len: i32) -> i32;
+        pub fn host_path(ptr: *const u8, len: i32, out: *mut u8, cap: i32) -> i32;
+
         // window
         pub fn set_title(ptr: *const u8, len: i32);
         pub fn resize(w: i32, h: i32);
@@ -410,6 +429,111 @@ pub fn window_size() -> (i32, i32) {
 /// window-management calls needs this to tell its own window from the ones it manages.
 pub fn window_id() -> i32 {
     unsafe { ffi::window_id() }
+}
+
+// ------------------------------------------------- clipping and layering --
+//
+// A clip confines every primitive, `clear` included, so it fills only the clipped region
+// — that is what makes it usable for a scrolling pane and not merely a guard. Nested
+// clips intersect, so a pane can never draw outside its parent. Both the clip stack and
+// the layer selection are reset when your tick returns.
+
+/// Confine drawing to a rectangle in window coordinates, intersected with the clip
+/// already in force. `false` when the stack is too deep to take another.
+///
+/// Prefer [`clip`], which pops for you.
+pub fn clip_push(x: i32, y: i32, w: i32, h: i32) -> bool {
+    unsafe { ffi::clip_push(x, y, w, h) == 0 }
+}
+
+pub fn clip_pop() -> bool {
+    unsafe { ffi::clip_pop() == 0 }
+}
+
+pub fn clip_reset() -> bool {
+    unsafe { ffi::clip_reset() == 0 }
+}
+
+/// `(x, y, w, h)` of the clip in force, already intersected with every enclosing one.
+///
+/// Four calls rather than one packed buffer, the way [`work_area`] is: nothing but this
+/// app's own calls moves the clip, so the four cannot disagree with each other.
+pub fn clip_rect() -> (i32, i32, i32, i32) {
+    unsafe { (ffi::clip_x(), ffi::clip_y(), ffi::clip_w(), ffi::clip_h()) }
+}
+
+/// A clip that pops itself at the end of the scope, so an early `return` in the middle of
+/// a pane cannot leave the rest of the frame drawing into a sliver.
+///
+/// ```ignore
+/// let _pane = retros::clip(0, 16, w, h - 16);
+/// draw_rows();
+/// ```
+pub struct Clip {
+    /// A refused push must not pop on drop: it would discard the *enclosing* clip, which
+    /// this app pushed for a reason.
+    pushed: bool,
+}
+
+impl Drop for Clip {
+    fn drop(&mut self) {
+        if self.pushed {
+            clip_pop();
+        }
+    }
+}
+
+/// Push a clip and get a guard that pops it. Binding it to `_` drops it immediately and
+/// clips nothing, which is why the result must be named.
+#[must_use = "the clip is popped as soon as the guard is dropped"]
+pub fn clip(x: i32, y: i32, w: i32, h: i32) -> Clip {
+    Clip { pushed: clip_push(x, y, w, h) }
+}
+
+/// Send subsequent drawing to layer `n`.
+///
+/// 0 draws immediately and costs nothing extra. Anything higher is recorded and replayed
+/// after your tick in ascending order, which is how a drop-down or a modal lands above
+/// widgets declared after it. `false` when `n` is above the engine's ceiling.
+pub fn layer(n: i32) -> bool {
+    unsafe { ffi::layer(n) == 0 }
+}
+
+pub fn current_layer() -> i32 {
+    unsafe { ffi::current_layer() }
+}
+
+// -------------------------------------------------------------------- power --
+//
+// Both need `permissions.power` and return `false` without it. Both take effect once the
+// current tick returns, so the caller keeps running to the end of its frame.
+
+/// Stop RetrOS: every app is given its `shutdown` before the process exits.
+pub fn shutdown() -> bool {
+    unsafe { ffi::shutdown() == 0 }
+}
+
+/// Restart in place — config, theme, registry and fonts are rebuilt from disk without
+/// leaving the process.
+pub fn reboot() -> bool {
+    unsafe { ffi::reboot() == 0 }
+}
+
+// ------------------------------------------------------------- host handoff --
+//
+// Both need `permissions.host_open`. The path is resolved through this app's own sandbox
+// first, so it can only ever hand over something it could already read.
+
+/// Ask the host operating system to open one of this app's paths with whatever it
+/// considers the right program.
+pub fn host_open(path: &str) -> bool {
+    unsafe { ffi::host_open(path.as_ptr(), path.len() as i32) == 0 }
+}
+
+/// Where a sandbox path really lives on the host, so an app can show the user the path
+/// they would type into a terminal.
+pub fn host_path(path: &str) -> Option<String> {
+    read_string(|out, cap| unsafe { ffi::host_path(path.as_ptr(), path.len() as i32, out, cap) })
 }
 
 // ------------------------------------------------------------------- window --
@@ -1102,4 +1226,69 @@ pub fn set_cursor(name: &str) -> bool {
 /// regions line up with the chrome the user actually sees.
 pub fn chrome_metrics() -> (i32, i32) {
     unsafe { (ffi::chrome_title_height(), ffi::chrome_border_width()) }
+}
+
+// ------------------------------------------------------------------- events --
+//
+// Events reach a wasm app the long way round: the host has no allocator inside the guest,
+// so it writes the event name and value into memory the *app* owns and calls `on_event`
+// with offsets into it. The app advertises that memory by exporting
+// `retros_event_scratch` and `retros_event_scratch_len` — and an app that exports neither
+// is silently never sent an event at all, which looks exactly like an engine bug.
+
+/// Declare the buffer the host delivers events into. Every app with an `on_event` needs
+/// this once, at module level.
+///
+/// ```ignore
+/// retros::event_scratch!();
+///
+/// #[retros::main]
+/// fn on_event(name: i32, name_len: i32, arg: i32, arg_len: i32) {
+///     let name = retros::event_str(name, name_len);
+///     let arg = retros::event_str(arg, arg_len);
+/// }
+/// ```
+///
+/// The default holds 256 bytes for the name and value together; pass a size to take more.
+/// An event that does not fit is dropped rather than truncated.
+#[macro_export]
+macro_rules! event_scratch {
+    () => {
+        $crate::event_scratch!(256);
+    };
+    ($capacity:expr) => {
+        const __RETROS_EVENT_SCRATCH_LEN: usize = $capacity;
+        static mut __RETROS_EVENT_SCRATCH: [u8; __RETROS_EVENT_SCRATCH_LEN] =
+            [0; __RETROS_EVENT_SCRATCH_LEN];
+
+        // `unsafe(no_mangle)` for the same reason `#[retros::main]` uses it: these tokens
+        // carry the SDK's edition, which is 2024, where the bare form is rejected.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn retros_event_scratch() -> i32 {
+            // A raw pointer, never a reference: `&static mut` is undefined behaviour the
+            // moment the host writes through it.
+            (&raw const __RETROS_EVENT_SCRATCH) as i32
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn retros_event_scratch_len() -> i32 {
+            __RETROS_EVENT_SCRATCH_LEN as i32
+        }
+    };
+}
+
+/// Borrow one of the strings the host just wrote into the scratch buffer.
+///
+/// Valid for exactly as long as the `on_event` call: the bytes were written immediately
+/// before it and the next event overwrites them. Copy anything you intend to keep.
+pub fn event_str<'a>(ptr: i32, len: i32) -> &'a str {
+    if ptr <= 0 || len <= 0 {
+        return "";
+    }
+    // Safe under the contract above, and non-UTF-8 is impossible: the host only ever
+    // writes `&str` bytes here.
+    unsafe {
+        let bytes = core::slice::from_raw_parts(ptr as *const u8, len as usize);
+        core::str::from_utf8(bytes).unwrap_or("")
+    }
 }
