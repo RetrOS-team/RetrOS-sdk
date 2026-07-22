@@ -1,0 +1,9 @@
+[package]
+name = "retros-mixin-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stable C-ABI contract between the RetrOS core and `kind = \"mixin\"` packages."
+
+[lib]
+path = "src/lib.rs"

@@ -482,6 +482,8 @@ pub struct Entry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+    /// Seconds since the Unix epoch, or zero when the platform would not say.
+    pub modified: u64,
 }
 
 pub fn fs_list(dir: &str) -> Vec<Entry> {
@@ -493,12 +495,13 @@ pub fn fs_list(dir: &str) -> Vec<Entry> {
     raw.lines()
         .filter(|l| !l.is_empty())
         .filter_map(|line| {
-            // "name\tis_dir\tsize"
+            // "name\tis_dir\tsize\tmodified"
             let mut parts = line.split('\t');
             let name = parts.next()?;
             let is_dir = parts.next()? == "1";
             let size = parts.next()?.parse().ok()?;
-            Some(Entry { name: String::from(name), is_dir, size })
+            let modified = parts.next()?.parse().ok()?;
+            Some(Entry { name: String::from(name), is_dir, size, modified })
         })
         .collect()
 }
@@ -814,6 +817,7 @@ pub struct WindowInfo {
     pub minimizable: bool,
     pub maximizable: bool,
     pub always_on_top: bool,
+    pub always_on_bottom: bool,
 }
 
 pub fn win_list() -> Vec<WindowInfo> {
@@ -834,6 +838,7 @@ pub fn win_list() -> Vec<WindowInfo> {
                 minimizable: parts.next()? == "1",
                 maximizable: parts.next()? == "1",
                 always_on_top: parts.next()? == "1",
+                always_on_bottom: parts.next()? == "1",
             })
         })
         .collect()
