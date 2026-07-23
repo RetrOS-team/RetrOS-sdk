@@ -1,8 +1,8 @@
 [package]
 name = "retros-mixin-api"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
 description = "Stable C-ABI contract between the RetrOS core and `kind = \"mixin\"` packages."
 
 [lib]
