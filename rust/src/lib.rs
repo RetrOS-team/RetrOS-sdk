@@ -138,7 +138,7 @@ pub mod ffi {
         // system
         pub fn list_packages(out: *mut u8, cap: i32) -> i32;
         pub fn launch_package(id: *const u8, id_len: i32, args: *const u8, args_len: i32) -> i32;
-        pub fn rospm(argv: *const u8, argv_len: i32, out: *mut u8, cap: i32) -> i32;
+        pub fn rpkg(argv: *const u8, argv_len: i32, out: *mut u8, cap: i32) -> i32;
         pub fn args(out: *mut u8, cap: i32) -> i32;
         pub fn package_id(out: *mut u8, cap: i32) -> i32;
         pub fn exit();
@@ -765,12 +765,12 @@ pub fn launch_package(id: &str, args: &str) -> bool {
     }
 }
 
-/// Run `rospm` and return its output. Requires `permissions.package_manager`, which
+/// Run `rpkg` and return its output. Requires `permissions.package_manager`, which
 /// only the `console` package declares by default.
-pub fn rospm(args: &[&str]) -> Option<String> {
+pub fn rpkg(args: &[&str]) -> Option<String> {
     let joined = args.join("\n");
     read_string(|out, cap| unsafe {
-        ffi::rospm(joined.as_ptr(), joined.len() as i32, out, cap)
+        ffi::rpkg(joined.as_ptr(), joined.len() as i32, out, cap)
     })
 }
 
